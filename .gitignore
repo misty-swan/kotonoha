@@ -1,0 +1,7 @@
+# 調査メモ（非公開）
+research/
+# skill-creator の評価用ワークスペース
+*-workspace/
+node_modules/
+.DS_Store
+.claude/
