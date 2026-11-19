@@ -7,6 +7,8 @@
 //   node check.mjs --json <ファイル>      JSON で出力する
 //   node check.mjs --max-length 100 ...  一文の長さの目安を変える（既定 80）
 //   node check.mjs --max-ten 4 ...       一文の読点の上限を変える（既定 3。超えたら指摘）
+//   node check.mjs --yomiage ...         読み上げ原稿として点検する（声にならない記号を指摘し、
+//                                        読点の数・文末の連続・短い主語の後の読点の指摘を緩める）
 //
 // 正規表現による検出なので、誤検出があります。指摘をすべて直すのではなく、
 // 文脈を見て判断してください。コードブロック、インラインコード、引用、URL は対象外です。
@@ -18,17 +20,23 @@ const argv = process.argv.slice(2);
 let asJson = false;
 let maxLength = 80;
 let maxTen = 3;
+let maxTenGiven = false;
+let yomiage = false;
 let file = null;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--json') asJson = true;
   else if (a === '--max-length') maxLength = Number(argv[++i]) || maxLength;
-  else if (a === '--max-ten') maxTen = Number(argv[++i]) || maxTen;
+  else if (a === '--max-ten') { maxTen = Number(argv[++i]) || maxTen; maxTenGiven = true; }
+  else if (a === '--yomiage') yomiage = true;
   else if (a === '-h' || a === '--help') {
-    console.log('使い方: node check.mjs [--json] [--max-length N] [--max-ten N] [ファイル]');
+    console.log('使い方: node check.mjs [--json] [--yomiage] [--max-length N] [--max-ten N] [ファイル]');
     process.exit(0);
   } else file = a;
 }
+
+// 読み上げ原稿では、息継ぎの読点を許すため、読点の上限を緩める（yomiage.md 5）。
+if (yomiage && !maxTenGiven) maxTen = 5;
 
 let text;
 try {
@@ -159,6 +167,27 @@ const rules = [
   { level: 'check', label: '漢字の連続', re: /[一-龠々〆ヵヶ]{7,}/g, suggest: () => '助詞を補うか、和語でほどく' },
 ];
 
+// 読み上げ原稿でだけ使うルール（yomiage.md 4）。声にならない記号を指摘する。
+const yomiageRules = [
+  { level: 'check', label: '声にならない記号（中黒）', re: /・/g,
+    suggest: () => '読点や「や」「と」でつなぐ。順を追って言う' },
+  { level: 'check', label: '声にならない記号（括弧）', re: /[（(][^）)]*[）)]/g,
+    suggest: () => '中身を本文に溶かすか、別の文にする' },
+  { level: 'check', label: '声にならない記号（二重括弧）', re: /『[^』]*』/g,
+    suggest: () => '「〜という」で示し、原稿の中では一種類にそろえる' },
+  { level: 'check', label: '声にならない記号（ダッシュ・リーダー）', re: /[―—]+|…+|‥+/g,
+    suggest: () => '句点か読点に置き換える' },
+  { level: 'check', label: '声にならない記号（スラッシュ）', re: /[／/]/g,
+    suggest: () => '「または」「や」「と」に言い換える' },
+  { level: 'check', label: '声にならない記号（波ダッシュ）', re: /[〜～~]/g,
+    suggest: () => '「から」「まで」と言える形にする' },
+  { level: 'check', label: '声にならない記号（米印・矢印）', re: /[※→⇒]/g,
+    suggest: () => '本文に溶かすか、確認へ回す' },
+  { level: 'check', label: '伏せ字', re: /([〇○●△▲×✕□■＊*])\1+/g,
+    suggest: () => 'そのまま読まれてしまう。読む前に入れてもらうよう確認へ回す' },
+];
+if (yomiage) rules.push(...yomiageRules);
+
 // ---------- 検出 ----------
 const findings = [];
 const ctx = (line, start, end) => {
@@ -220,7 +249,7 @@ for (const s of sentences) {
     findings.push({ level: 'check', rule: '長い文に読点がない', line: s.line, match: `${len}字・読点0`,
       suggest: '区切りを検討する（touten.md 3）', context: s.text.slice(0, 30) + '…' });
   }
-  if (len <= 20 && /^(私|僕|わたし|ぼく|彼|彼女|我々|私たち|弊社|当社)は、/.test(s.text)) {
+  if (!yomiage && len <= 20 && /^(私|僕|わたし|ぼく|彼|彼女|我々|私たち|弊社|当社)は、/.test(s.text)) {
     findings.push({ level: 'check', rule: '短い文の主語の後の読点', line: s.line, match: s.text.match(/^[^、]+、/)[0],
       suggest: '短い文なら読点は不要なことが多い（touten.md 2-1）', context: s.text });
   }
@@ -238,8 +267,9 @@ for (const s of sentences) {
   const key = t.slice(-2);
   if (key && key === prevKey) run++; else run = 1;
   prevKey = key;
-  if (run === 3) {
-    findings.push({ level: 'check', rule: '同じ文末の連続', line: s.line, match: `「${key}」が3回続く`,
+  // 読み上げ原稿では丁寧な文末が続くのは自然なので、5回続いたときだけ指摘する（yomiage.md 6）。
+  if (run === (yomiage ? 5 : 3)) {
+    findings.push({ level: 'check', rule: '同じ文末の連続', line: s.line, match: `「${key}」が${run}回続く`,
       suggest: '文末に変化を付けるか、文をまとめる', context: s.text.slice(-30) });
   }
 }
@@ -286,6 +316,7 @@ const stats = {
   longestSentenceLine: lens.length ? sentences[lens.indexOf(longest)].line : null,
   kanjiRatio: chars.length ? Math.round((kanji / chars.length) * 100) : 0,
   style: nDesu && nDearu ? '混在' : nDesu ? '敬体' : nDearu ? '常体' : '判定できず',
+  mode: yomiage ? '読み上げ原稿' : '目で読む文書',
 };
 
 // ---------- 出力 ----------
@@ -296,7 +327,7 @@ if (asJson) {
   const out = kept.map(({ start, end, ...f }) => ({ ...f, level: names[f.level] }));
   console.log(JSON.stringify({ summary: Object.fromEntries(Object.keys(names).map((k) => [names[k], count(k)])), findings: out, stats }, null, 2));
 } else {
-  console.log(`kotonoha check — 指摘 ${kept.length} 件（誤り ${count('error')}／品位 ${count('hin')}／表記 ${count('hyoki')}／要確認 ${count('check')}）`);
+  console.log(`kotonoha check${yomiage ? '（読み上げ原稿）' : ''} — 指摘 ${kept.length} 件（誤り ${count('error')}／品位 ${count('hin')}／表記 ${count('hyoki')}／要確認 ${count('check')}）`);
   console.log('※ 機械的な検出です。誤検出もあるため、文脈を見て判断してください。\n');
   for (const lv of Object.keys(names)) {
     const fs = kept.filter((f) => f.level === lv);
