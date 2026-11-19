@@ -9,6 +9,7 @@
 //   node check.mjs --max-ten 4 ...       一文の読点の上限を変える（既定 3。超えたら指摘）
 //   node check.mjs --yomiage ...         読み上げ原稿として点検する（声にならない記号を指摘し、
 //                                        読点の数・文末の連続・短い主語の後の読点の指摘を緩める）
+//   node check.mjs --keicho ...          慶弔の文として点検する（忌み言葉・重ね言葉・宗教語を指摘する）
 //
 // 正規表現による検出なので、誤検出があります。指摘をすべて直すのではなく、
 // 文脈を見て判断してください。コードブロック、インラインコード、引用、URL は対象外です。
@@ -22,6 +23,7 @@ let maxLength = 80;
 let maxTen = 3;
 let maxTenGiven = false;
 let yomiage = false;
+let keicho = false;
 let file = null;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -29,8 +31,9 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--max-length') maxLength = Number(argv[++i]) || maxLength;
   else if (a === '--max-ten') { maxTen = Number(argv[++i]) || maxTen; maxTenGiven = true; }
   else if (a === '--yomiage') yomiage = true;
+  else if (a === '--keicho') keicho = true;
   else if (a === '-h' || a === '--help') {
-    console.log('使い方: node check.mjs [--json] [--yomiage] [--max-length N] [--max-ten N] [ファイル]');
+    console.log('使い方: node check.mjs [--json] [--yomiage] [--keicho] [--max-length N] [--max-ten N] [ファイル]');
     process.exit(0);
   } else file = a;
 }
@@ -185,8 +188,31 @@ const yomiageRules = [
     suggest: () => '本文に溶かすか、確認へ回す' },
   { level: 'check', label: '伏せ字', re: /([〇○●△▲×✕□■＊*])\1+/g,
     suggest: () => 'そのまま読まれてしまう。読む前に入れてもらうよう確認へ回す' },
+  { level: 'check', label: '声に出しにくい表記（階）', re: /(?<![0-9０-９A-Za-z])[0-9０-９]+[FＦ](?![A-Za-zＡ-Ｚａ-ｚ])|[BＢ][0-9０-９]+[FＦ]?(?![0-9A-Za-z])/g,
+    suggest: () => '「1階」「地下1階」のように言える形にする' },
+  { level: 'check', label: '声に出しにくい表記（時刻）', re: /(?<![0-9０-９])[0-9０-９]{1,2}[:：][0-9０-９]{2}(?![0-9０-９])/g,
+    suggest: () => '「午前10時」「10時半」のように言える形にする（時刻そのものは変えない）' },
+];
+
+// 慶弔の文でだけ使うルール（keicho.md）。慣習の強さで分け、直すか確認へ回すかの手がかりにする。
+const keichoRules = [
+  { level: 'check', label: '慶事で避けられる語（広く一致）', re: /別れ|離れ|離婚|終わ[るりっら]|切れ|割れ|壊れ|破れ|ほころ/g,
+    suggest: () => '慶事なら言い換える（keicho.md 2-1）。事実を変える言い換えは確認へ' },
+  { level: 'check', label: '重ね言葉（広く一致）', re: /重ね重ね|重ね々|くれぐれも|呉々も|たびたび|度々|しばしば|屡々|かえすがえす|返す返す/g,
+    suggest: () => '慶事・弔事とも言い換える（keicho.md 2-2、3-2）' },
+  { level: 'check', label: '不幸の繰り返しを思わせる語（弔事・広く一致）', re: /再び|再度/g,
+    suggest: () => '弔事なら言い換える（keicho.md 3-2）。慶事では問題にしない' },
+  { level: 'check', label: '重ね言葉（出典で割れる）', re: /ますます|益々|いろいろ|色々|ではまた|なおまた/g,
+    suggest: () => '本文は直さず、避ける考え方があることと言い換え案を確認へ（keicho.md 2-2、3-2）' },
+  { level: 'check', label: '死を直接いう語（弔事）', re: /死ぬ|死ん[だで]|死亡|死去/g,
+    suggest: () => '弔事なら「亡くなる」「ご逝去」などに。敬意の向きに注意（keicho.md 3-1）' },
+  { level: 'check', label: '宗教による語（弔事）', re: /冥福|成仏|往生|供養|天国/g,
+    suggest: () => '宗派・宗教が分からなければ直さず確認へ（keicho.md 3-3）' },
+  { level: 'check', label: '喪中で避ける語', re: /年賀|去年/g,
+    suggest: () => '喪中なら「年始のご挨拶」、年賀状の「去年」は確認へ（keicho.md 5-2）' },
 ];
 if (yomiage) rules.push(...yomiageRules);
+if (keicho) rules.push(...keichoRules);
 
 // ---------- 検出 ----------
 const findings = [];
@@ -316,7 +342,7 @@ const stats = {
   longestSentenceLine: lens.length ? sentences[lens.indexOf(longest)].line : null,
   kanjiRatio: chars.length ? Math.round((kanji / chars.length) * 100) : 0,
   style: nDesu && nDearu ? '混在' : nDesu ? '敬体' : nDearu ? '常体' : '判定できず',
-  mode: yomiage ? '読み上げ原稿' : '目で読む文書',
+  mode: [yomiage ? '読み上げ原稿' : '目で読む文書', keicho ? '慶弔の文' : null].filter(Boolean).join('・'),
 };
 
 // ---------- 出力 ----------
@@ -327,7 +353,7 @@ if (asJson) {
   const out = kept.map(({ start, end, ...f }) => ({ ...f, level: names[f.level] }));
   console.log(JSON.stringify({ summary: Object.fromEntries(Object.keys(names).map((k) => [names[k], count(k)])), findings: out, stats }, null, 2));
 } else {
-  console.log(`kotonoha check${yomiage ? '（読み上げ原稿）' : ''} — 指摘 ${kept.length} 件（誤り ${count('error')}／品位 ${count('hin')}／表記 ${count('hyoki')}／要確認 ${count('check')}）`);
+  console.log(`kotonoha check${yomiage || keicho ? `（${[yomiage && '読み上げ原稿', keicho && '慶弔の文'].filter(Boolean).join('・')}）` : ''} — 指摘 ${kept.length} 件（誤り ${count('error')}／品位 ${count('hin')}／表記 ${count('hyoki')}／要確認 ${count('check')}）`);
   console.log('※ 機械的な検出です。誤検出もあるため、文脈を見て判断してください。\n');
   for (const lv of Object.keys(names)) {
     const fs = kept.filter((f) => f.level === lv);
